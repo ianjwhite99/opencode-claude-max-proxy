@@ -10,26 +10,8 @@ import { execSync } from "child_process"
 import { existsSync } from "fs"
 import { fileURLToPath } from "url"
 import { join, dirname } from "path"
-import { opencodeMcpServer } from "../mcpTools"
 import { randomUUID } from "crypto"
 import { withClaudeLogContext } from "../logger"
-
-const BLOCKED_BUILTIN_TOOLS = [
-  "Read", "Write", "Edit", "MultiEdit",
-  "Bash", "Glob", "Grep", "NotebookEdit",
-  "WebFetch", "WebSearch", "TodoWrite"
-]
-
-const MCP_SERVER_NAME = "opencode"
-
-const ALLOWED_MCP_TOOLS = [
-  `mcp__${MCP_SERVER_NAME}__read`,
-  `mcp__${MCP_SERVER_NAME}__write`,
-  `mcp__${MCP_SERVER_NAME}__edit`,
-  `mcp__${MCP_SERVER_NAME}__bash`,
-  `mcp__${MCP_SERVER_NAME}__glob`,
-  `mcp__${MCP_SERVER_NAME}__grep`
-]
 
 // Queue to serialize Claude Agent SDK queries and avoid ~60s delay on concurrent requests
 const requestQueue = new PQueue({ concurrency: 1 })
@@ -113,18 +95,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
         }
       }
 
-      // Convert messages to a text prompt
+      // Convert messages to a text prompt, preserving all content types
       const conversationParts = body.messages
-        ?.map((m: { role: string; content: string | Array<{ type: string; text?: string }> }) => {
+        ?.map((m: { role: string; content: string | Array<{ type: string; text?: string; content?: string; tool_use_id?: string; name?: string; input?: unknown; id?: string }> }) => {
           const role = m.role === "assistant" ? "Assistant" : "Human"
           let content: string
           if (typeof m.content === "string") {
             content = m.content
           } else if (Array.isArray(m.content)) {
             content = m.content
-              .filter((block: any) => block.type === "text" && block.text)
-              .map((block: any) => block.text)
-              .join("")
+              .map((block: any) => {
+                if (block.type === "text" && block.text) return block.text
+                if (block.type === "tool_use") return `[Tool Use: ${block.name}(${JSON.stringify(block.input)})]`
+                if (block.type === "tool_result") return `[Tool Result for ${block.tool_use_id}: ${typeof block.content === "string" ? block.content : JSON.stringify(block.content)}]`
+                return ""
+              })
+              .filter(Boolean)
+              .join("\n")
           } else {
             content = String(m.content)
           }
@@ -149,14 +136,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
             const response = query({
               prompt,
               options: {
-                maxTurns: 100,
+                maxTurns: 1,
                 model,
                 pathToClaudeCodeExecutable: claudeExecutable,
-                disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
-                allowedTools: [...ALLOWED_MCP_TOOLS],
-                mcpServers: {
-                  [MCP_SERVER_NAME]: opencodeMcpServer
-                }
               }
             })
 
@@ -266,15 +248,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               const response = query({
                 prompt,
                 options: {
-                  maxTurns: 100,
+                  maxTurns: 1,
                   model,
                   pathToClaudeCodeExecutable: claudeExecutable,
                   includePartialMessages: true,
-                  disallowedTools: [...BLOCKED_BUILTIN_TOOLS],
-                  allowedTools: [...ALLOWED_MCP_TOOLS],
-                  mcpServers: {
-                    [MCP_SERVER_NAME]: opencodeMcpServer
-                  }
                 }
               })
 
