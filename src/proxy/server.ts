@@ -313,32 +313,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
     })
   })
 
-  // --- Concurrency Control ---
-  // Each request spawns an SDK subprocess (cli.js, ~11MB). Spawning multiple
-  // simultaneously can crash the process. Serialize SDK queries with a queue.
+  // --- Concurrency Tracking (for logging) ---
   const MAX_CONCURRENT_SESSIONS = parseInt(process.env.CLAUDE_PROXY_MAX_CONCURRENT || "10", 10)
   let activeSessions = 0
-  const sessionQueue: Array<{ resolve: () => void }> = []
-
-  async function acquireSession(): Promise<void> {
-    if (activeSessions < MAX_CONCURRENT_SESSIONS) {
-      activeSessions++
-      return
-    }
-    // Wait for a slot
-    return new Promise<void>((resolve) => {
-      sessionQueue.push({ resolve })
-    })
-  }
-
-  function releaseSession(): void {
-    activeSessions--
-    const next = sessionQueue.shift()
-    if (next) {
-      activeSessions++
-      next.resolve()
-    }
-  }
 
   const handleMessages = async (
     c: Context,

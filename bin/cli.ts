@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 
 import { startProxyServer } from "../src/proxy/server"
 import { execSync } from "child_process"
