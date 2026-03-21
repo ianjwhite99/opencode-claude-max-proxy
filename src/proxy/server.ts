@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { serve } from "@hono/node-server"
+import type { Server } from "node:http"
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import type { Context } from "hono"
 import type { ProxyConfig } from "./types"
@@ -313,9 +314,31 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
     })
   })
 
-  // --- Concurrency Tracking (for logging) ---
+  // --- Concurrency Control ---
+  // Each request spawns an SDK subprocess (cli.js, ~11MB). Spawning multiple
+  // simultaneously can crash the process. Serialize SDK queries with a queue.
   const MAX_CONCURRENT_SESSIONS = parseInt(process.env.CLAUDE_PROXY_MAX_CONCURRENT || "10", 10)
   let activeSessions = 0
+  const sessionQueue: Array<{ resolve: () => void }> = []
+
+  async function acquireSession(): Promise<void> {
+    if (activeSessions < MAX_CONCURRENT_SESSIONS) {
+      activeSessions++
+      return
+    }
+    return new Promise<void>((resolve) => {
+      sessionQueue.push({ resolve })
+    })
+  }
+
+  function releaseSession(): void {
+    activeSessions--
+    const next = sessionQueue.shift()
+    if (next) {
+      activeSessions++
+      next.resolve()
+    }
+  }
 
   const handleMessages = async (
     c: Context,
@@ -1065,19 +1088,21 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
     })
   }
 
-  app.post("/v1/messages", async (c) => {
+  const handleWithQueue = async (c: Context, endpoint: string) => {
     const requestId = c.req.header("x-request-id") || randomUUID()
-    const startedAt = Date.now()
-    claudeLog("request.enter", { requestId, endpoint: "/v1/messages" })
-    return handleMessages(c, { requestId, endpoint: "/v1/messages", queueEnteredAt: startedAt, queueStartedAt: startedAt })
-  })
+    const queueEnteredAt = Date.now()
+    claudeLog("request.enter", { requestId, endpoint })
+    await acquireSession()
+    const queueStartedAt = Date.now()
+    try {
+      return await handleMessages(c, { requestId, endpoint, queueEnteredAt, queueStartedAt })
+    } finally {
+      releaseSession()
+    }
+  }
 
-  app.post("/messages", async (c) => {
-    const requestId = c.req.header("x-request-id") || randomUUID()
-    const startedAt = Date.now()
-    claudeLog("request.enter", { requestId, endpoint: "/messages" })
-    return handleMessages(c, { requestId, endpoint: "/messages", queueEnteredAt: startedAt, queueStartedAt: startedAt })
-  })
+  app.post("/v1/messages", (c) => handleWithQueue(c, "/v1/messages"))
+  app.post("/messages", (c) => handleWithQueue(c, "/messages"))
 
   // Health check endpoint — verifies auth status
   app.get("/health", (c) => {
@@ -1129,7 +1154,11 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}) {
     console.log(`Claude Max Proxy (Anthropic API) running at http://${finalConfig.host}:${info.port}`)
     console.log(`\nTo use with OpenCode, run:`)
     console.log(`  ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://${finalConfig.host}:${info.port} opencode`)
-  })
+  }) as Server
+
+  const idleMs = finalConfig.idleTimeoutSeconds * 1000
+  server.keepAliveTimeout = idleMs
+  server.headersTimeout = idleMs + 1000
 
   server.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "EADDRINUSE") {
