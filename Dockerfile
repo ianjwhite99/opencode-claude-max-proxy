@@ -28,7 +28,7 @@ WORKDIR /app
 COPY --from=build --chown=claude:claude /app/node_modules ./node_modules
 COPY --from=build --chown=claude:claude /app/dist ./dist
 COPY --from=build --chown=claude:claude /app/package.json ./
-COPY --chown=claude:claude bin/docker-entrypoint.sh ./bin/
+COPY --chown=claude:claude bin/docker-entrypoint.sh bin/claude-proxy-supervisor.sh ./bin/
 
 EXPOSE 3456
 
@@ -38,4 +38,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 ENV CLAUDE_PROXY_PASSTHROUGH=1 \
     CLAUDE_PROXY_HOST=0.0.0.0
 ENTRYPOINT ["./bin/docker-entrypoint.sh"]
-CMD ["node", "dist/cli.js"]
+CMD ["./bin/claude-proxy-supervisor.sh"]
