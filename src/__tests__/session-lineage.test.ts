@@ -6,6 +6,9 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { assistantMessage } from "./helpers"
 
 type MockSdkMessage = Record<string, unknown>
@@ -37,13 +40,17 @@ mock.module("../mcpTools", () => ({
   opencodeMcpServer: { type: "sdk", name: "opencode", instance: {} },
 }))
 
-mock.module("../proxy/sessionStore", () => ({
-  lookupSharedSession: () => undefined,
-  storeSharedSession: () => {},
-  clearSharedSessions: () => {},
-}))
+const lineageTmpDir = mkdtempSync(join(tmpdir(), "session-lineage-test-"))
+process.env.CLAUDE_PROXY_SESSION_DIR = lineageTmpDir
 
 const { createProxyServer, clearSessionCache, computeLineageHash } = await import("../proxy/server")
+const { clearSharedSessions } = await import("../proxy/sessionStore")
+
+afterAll(() => {
+  rmSync(lineageTmpDir, { recursive: true, force: true })
+  delete process.env.CLAUDE_PROXY_SESSION_DIR
+  mock.restore()
+})
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -78,6 +85,7 @@ beforeEach(() => {
   capturedQueryParams = null
   queuedSessionIds = []
   clearSessionCache()
+  clearSharedSessions()
 })
 
 describe("computeLineageHash", () => {
