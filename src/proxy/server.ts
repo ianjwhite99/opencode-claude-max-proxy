@@ -103,21 +103,10 @@ export function clearSessionCache() {
   try { clearSharedSessions() } catch {}
 }
 
-// Clean stale sessions every hour — sessions survive a full workday
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
-export function startSessionCleanup(): ReturnType<typeof setInterval> {
-  return setInterval(() => {
-    const now = Date.now()
-    for (const [key, val] of sessionCache) {
-      if (now - val.lastAccess > SESSION_TTL_MS) sessionCache.delete(key)
-    }
-    for (const [key, val] of fingerprintCache) {
-      if (now - val.lastAccess > SESSION_TTL_MS) fingerprintCache.delete(key)
-    }
-  }, 60 * 60 * 1000)
-}
-
-// No module-level timer — cleanup is started per instance in startProxyServer()
+// No time-based session eviction. The in-memory LRU caches (bounded by
+// MAX_SESSIONS) handle memory pressure. The file store (sessionStore.ts)
+// uses count-based pruning. SDK sessions persist on Anthropic's side for
+// weeks — we should never discard a valid mapping before the SDK does.
 
 /** Hash the first user message + system context to fingerprint a conversation.
  *  Including system context prevents cross-project collisions when different
@@ -182,6 +171,12 @@ function verifyLineage(
   return cached
 }
 
+/** Refresh lastAccess on a verified session so LRU eviction reflects actual usage */
+function touchSession(state: SessionState): SessionState {
+  state.lastAccess = Date.now()
+  return state
+}
+
 /** Look up a cached session by header or fingerprint */
 function lookupSession(
   opencodeSessionId: string | undefined,
@@ -190,12 +185,15 @@ function lookupSession(
 ): SessionState | undefined {
   if (opencodeSessionId) {
     const cached = sessionCache.get(opencodeSessionId)
-    if (cached) return verifyLineage(cached, messages, opencodeSessionId, sessionCache)
+    if (cached) {
+      const verified = verifyLineage(cached, messages, opencodeSessionId, sessionCache)
+      return verified ? touchSession(verified) : undefined
+    }
     const shared = lookupSharedSession(opencodeSessionId)
     if (shared) {
       const state: SessionState = {
         claudeSessionId: shared.claudeSessionId,
-        lastAccess: shared.lastUsedAt,
+        lastAccess: Date.now(),
         messageCount: shared.messageCount || 0,
         lineageHash: shared.lineageHash || "",
       }
@@ -209,12 +207,15 @@ function lookupSession(
   const fp = getConversationFingerprint(messages, systemContext)
   if (fp) {
     const cached = fingerprintCache.get(fp)
-    if (cached) return verifyLineage(cached, messages, fp, fingerprintCache)
+    if (cached) {
+      const verified = verifyLineage(cached, messages, fp, fingerprintCache)
+      return verified ? touchSession(verified) : undefined
+    }
     const shared = lookupSharedSession(fp)
     if (shared) {
       const state: SessionState = {
         claudeSessionId: shared.claudeSessionId,
-        lastAccess: shared.lastUsedAt,
+        lastAccess: Date.now(),
         messageCount: shared.messageCount || 0,
         lineageHash: shared.lineageHash || "",
       }
@@ -1392,9 +1393,6 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
   server.keepAliveTimeout = idleMs
   server.headersTimeout = idleMs + 1000
 
-  // Start a dedicated cleanup timer for this instance
-  const cleanupTimer = startSessionCleanup()
-
   server.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "EADDRINUSE" && !finalConfig.silent) {
       console.error(`\nError: Port ${finalConfig.port} is already in use.`)
@@ -1410,7 +1408,6 @@ export async function startProxyServer(config: Partial<ProxyConfig> = {}): Promi
     server,
     config: finalConfig,
     async close() {
-      clearInterval(cleanupTimer)
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })
