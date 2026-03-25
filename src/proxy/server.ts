@@ -19,8 +19,8 @@ import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASST
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
-import { classifyError, isStaleSessionError } from "./errors"
-import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync } from "./models"
+import { classifyError, isStaleSessionError, isRateLimitError } from "./errors"
+import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
 import { ALLOWED_MCP_TOOLS } from "./tools"
 import { getLastUserMessage } from "./messages"
 import { openCodeAdapter } from "./adapters/opencode"
@@ -182,7 +182,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       try {
         const body = await c.req.json()
         const authStatus = await getClaudeAuthStatusAsync()
-        const model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
+        let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
         const stream = body.stream ?? true
         const adapter = openCodeAdapter
         const workingDirectory = adapter.extractWorkingDirectory(body) || process.env.CLAUDE_PROXY_WORKDIR || process.cwd()
@@ -309,20 +309,22 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         })
       }
 
-      // Build the prompt — either structured (multimodal) or text
-      let prompt: string | AsyncIterable<any>
+      // Build the prompt — either structured (multimodal) or text.
+      // Structured prompts are stored as arrays so they can be replayed on retry.
+      let structuredMessages: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> | undefined
+      let textPrompt: string | undefined
 
       if (hasMultimodal) {
         // Structured messages preserve image/document/file blocks for Claude to see.
         // On resume, only send user messages (SDK has assistant context already).
         // On first request, include everything.
-        const structured: Array<{ type: "user"; message: { role: string; content: any }; parent_tool_use_id: null }> = []
+        structuredMessages = []
 
         if (isResume) {
           // Resume: only send user messages from the delta (SDK has the rest)
           for (const m of messagesToConvert) {
             if (m.role === "user") {
-              structured.push({
+              structuredMessages.push({
                 type: "user" as const,
                 message: { role: "user" as const, content: stripCacheControl(m.content) },
                 parent_tool_use_id: null,
@@ -333,7 +335,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           // First request: all messages (system context now passed via appendSystemPrompt)
           for (const m of messagesToConvert) {
             if (m.role === "user") {
-              structured.push({
+              structuredMessages.push({
                 type: "user" as const,
                 message: { role: "user" as const, content: stripCacheControl(m.content) },
                 parent_tool_use_id: null,
@@ -353,7 +355,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               } else {
                 text = `[Assistant: ${String(m.content)}]`
               }
-              structured.push({
+              structuredMessages.push({
                 type: "user" as const,
                 message: { role: "user" as const, content: text },
                 parent_tool_use_id: null,
@@ -361,11 +363,9 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             }
           }
         }
-
-        prompt = (async function* () { for (const msg of structured) yield msg })()
       } else {
         // Text prompt — convert messages to string
-        const conversationParts = messagesToConvert
+        textPrompt = messagesToConvert
           ?.map((m: { role: string; content: string | Array<{ type: string; text?: string; content?: string; tool_use_id?: string; name?: string; input?: unknown; id?: string }> }) => {
             const role = m.role === "assistant" ? "Assistant" : "Human"
             let content: string
@@ -390,9 +390,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             return `${role}: ${content}`
           })
           .join("\n\n") || ""
+      }
 
-        // System context now passed via appendSystemPrompt (not in prompt text)
-        prompt = conversationParts
+      // Create a fresh prompt value — can be called multiple times for retry
+      function makePrompt(): string | AsyncIterable<any> {
+        if (structuredMessages) {
+          const msgs = structuredMessages
+          return (async function* () { for (const msg of msgs) yield msg })()
+        }
+        return textPrompt!
       }
 
       // --- Passthrough mode ---
@@ -484,7 +490,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             const response = (async function* () {
               try {
                 yield* query(buildQueryOptions({
-                  prompt, model, workingDirectory, systemContext, claudeExecutable,
+                  prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                   passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                   resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
                 }))
@@ -548,13 +554,64 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               durationMs: Date.now() - upstreamStartAt
             })
           } catch (error) {
-            claudeLog("upstream.failed", {
-              mode: "non_stream",
-              model,
-              durationMs: Date.now() - upstreamStartAt,
-              error: error instanceof Error ? error.message : String(error)
-            })
-            throw error
+            const errMsg = error instanceof Error ? error.message : String(error)
+
+            // Rate-limit fallback: if using [1m] context, retry with base model
+            if (hasExtendedContext(model) && isRateLimitError(errMsg)) {
+              const fallbackModel = stripExtendedContext(model)
+              claudeLog("upstream.context_fallback", {
+                mode: "non_stream",
+                from: model,
+                to: fallbackModel,
+                reason: "rate_limit",
+              })
+              console.error(`[PROXY] ${requestMeta.requestId} rate-limited on ${model}, retrying with ${fallbackModel}`)
+              model = fallbackModel
+
+              const retryResponse = query(buildQueryOptions({
+                prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
+                passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
+                resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+              }))
+
+              for await (const message of retryResponse) {
+                if ((message as any).session_id) {
+                  currentSessionId = (message as any).session_id
+                }
+                if (message.type === "assistant") {
+                  assistantMessages += 1
+                  if ((message as any).uuid) {
+                    sdkUuidMap.push((message as any).uuid)
+                  }
+                  if (!firstChunkAt) {
+                    firstChunkAt = Date.now()
+                  }
+                  for (const block of message.message.content) {
+                    const b = block as Record<string, unknown>
+                    if (passthrough && b.type === "tool_use" && typeof b.name === "string") {
+                      b.name = stripMcpPrefix(b.name as string)
+                    }
+                    contentBlocks.push(b)
+                  }
+                }
+              }
+
+              claudeLog("upstream.completed", {
+                mode: "non_stream",
+                model,
+                assistantMessages,
+                durationMs: Date.now() - upstreamStartAt,
+                fallback: true,
+              })
+            } else {
+              claudeLog("upstream.failed", {
+                mode: "non_stream",
+                model,
+                durationMs: Date.now() - upstreamStartAt,
+                error: errMsg
+              })
+              throw error
+            }
           }
 
           // In passthrough mode, add captured tool_use blocks from the hook
@@ -682,13 +739,18 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               : new Array(allMessages.length - 1).fill(null)
             while (sdkUuidMap.length < allMessages.length) sdkUuidMap.push(null)
 
+            // Track if we've sent a message_start to the client — hoisted for
+            // access in the catch block (rate-limit fallback is only safe if
+            // no content has been emitted yet).
+            let messageStartEmitted = false
+
             try {
               let currentSessionId: string | undefined
               // Same stale-UUID retry wrapper as the non-streaming path
               const response = (async function* () {
                 try {
                   yield* query(buildQueryOptions({
-                    prompt, model, workingDirectory, systemContext, claudeExecutable,
+                    prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
                   }))
@@ -733,8 +795,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               }, 15_000)
 
               const skipBlockIndices = new Set<number>()
-              const streamedToolUseIds = new Set<string>() // Track tool_use IDs already forwarded in stream
-              let messageStartEmitted = false // Track if we've sent a message_start to the client
+              const streamedToolUseIds = new Set<string>()
 
               try {
                 for await (const message of response) {
@@ -966,16 +1027,156 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 return
               }
 
+              const errMsg = error instanceof Error ? error.message : String(error)
+
+              // Rate-limit fallback: if using [1m] context and no content has been
+              // sent to the client yet, retry transparently with the base model.
+              if (hasExtendedContext(model) && isRateLimitError(errMsg) && !messageStartEmitted) {
+                const fallbackModel = stripExtendedContext(model)
+                claudeLog("upstream.context_fallback", {
+                  mode: "stream",
+                  from: model,
+                  to: fallbackModel,
+                  reason: "rate_limit",
+                })
+                console.error(`[PROXY] ${requestMeta.requestId} rate-limited on ${model}, retrying with ${fallbackModel}`)
+                model = fallbackModel
+
+                try {
+                  const retryResponse = query(buildQueryOptions({
+                    prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
+                    passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
+                    resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+                  }))
+
+                  const retryHeartbeat = setInterval(() => {
+                    try {
+                      if (!safeEnqueue(encoder.encode(`: ping\n\n`), "retry_heartbeat")) {
+                        clearInterval(retryHeartbeat)
+                      }
+                    } catch {
+                      clearInterval(retryHeartbeat)
+                    }
+                  }, 15_000)
+
+                  // Fresh state for the retry stream
+                  const retrySkipBlocks = new Set<number>()
+                  const retryStreamedToolIds = new Set<string>()
+                  let retryMessageStartEmitted = false
+                  let retrySessionId: string | undefined
+
+                  try {
+                    for await (const message of retryResponse) {
+                      if (streamClosed) break
+
+                      if ((message as any).session_id) {
+                        retrySessionId = (message as any).session_id
+                      }
+                      if (message.type === "assistant" && (message as any).uuid) {
+                        sdkUuidMap.push((message as any).uuid)
+                      }
+
+                      if (message.type === "stream_event") {
+                        streamEventsSeen += 1
+                        if (!firstChunkAt) firstChunkAt = Date.now()
+
+                        const event = message.event
+                        const eventType = (event as any).type
+                        const eventIndex = (event as any).index as number | undefined
+
+                        if (eventType === "message_start") {
+                          retrySkipBlocks.clear()
+                          if (retryMessageStartEmitted) continue
+                          retryMessageStartEmitted = true
+                        }
+                        if (eventType === "message_stop") continue
+
+                        if (eventType === "content_block_start") {
+                          const block = (event as any).content_block
+                          if (block?.type === "tool_use" && typeof block.name === "string") {
+                            if (passthrough && block.name.startsWith(PASSTHROUGH_MCP_PREFIX)) {
+                              block.name = stripMcpPrefix(block.name)
+                              if (block.id) retryStreamedToolIds.add(block.id)
+                            } else if (block.name.startsWith("mcp__")) {
+                              if (eventIndex !== undefined) retrySkipBlocks.add(eventIndex)
+                              continue
+                            }
+                          }
+                        }
+
+                        if (eventIndex !== undefined && retrySkipBlocks.has(eventIndex)) continue
+
+                        if (eventType === "message_delta") {
+                          const stopReason = (event as any).delta?.stop_reason
+                          if (stopReason === "tool_use" && retrySkipBlocks.size > 0) continue
+                        }
+
+                        const payload = encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`)
+                        if (!safeEnqueue(payload, `retry_stream_event:${eventType}`)) break
+                        eventsForwarded += 1
+
+                        if (eventType === "content_block_delta") {
+                          const delta = (event as any).delta
+                          if (delta?.type === "text_delta") textEventsForwarded += 1
+                        }
+                      }
+                    }
+                  } finally {
+                    clearInterval(retryHeartbeat)
+                  }
+
+                  claudeLog("upstream.completed", {
+                    mode: "stream",
+                    model,
+                    durationMs: Date.now() - upstreamStartAt,
+                    streamEventsSeen,
+                    eventsForwarded,
+                    textEventsForwarded,
+                    fallback: true,
+                  })
+
+                  if (retrySessionId) {
+                    storeSession(opencodeSessionId, body.messages || [], retrySessionId, workingDirectory, sdkUuidMap)
+                  }
+
+                  if (!streamClosed) {
+                    if (retryMessageStartEmitted) {
+                      safeEnqueue(encoder.encode(`event: message_stop\ndata: {"type":"message_stop"}\n\n`), "retry_final_message_stop")
+                    }
+                    try { controller.close() } catch {}
+                    streamClosed = true
+                  }
+                  return
+                } catch (retryError) {
+                  // Retry also failed — fall through to emit error
+                  claudeLog("upstream.context_fallback_failed", {
+                    mode: "stream",
+                    model,
+                    error: retryError instanceof Error ? retryError.message : String(retryError),
+                  })
+                  const retryErr = classifyError(retryError instanceof Error ? retryError.message : String(retryError))
+                  safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+                    type: "error",
+                    error: { type: retryErr.type, message: retryErr.message }
+                  })}\n\n`), "retry_error_event")
+                  if (!streamClosed) {
+                    try { controller.close() } catch {}
+                    streamClosed = true
+                  }
+                  return
+                }
+              }
+
               claudeLog("upstream.failed", {
                 mode: "stream",
                 model,
                 durationMs: Date.now() - upstreamStartAt,
                 streamEventsSeen,
                 textEventsForwarded,
-                error: error instanceof Error ? error.message : String(error)
+                error: errMsg
               })
-              const streamErr = classifyError(error instanceof Error ? error.message : String(error))
-              claudeLog("proxy.anthropic.error", { error: error instanceof Error ? error.message : String(error), classified: streamErr.type })
+              const streamErr = classifyError(errMsg)
+              claudeLog("proxy.anthropic.error", { error: errMsg, classified: streamErr.type })
               safeEnqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
                 type: "error",
                 error: { type: streamErr.type, message: streamErr.message }

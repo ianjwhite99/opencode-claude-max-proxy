@@ -107,3 +107,12 @@ export function isStaleSessionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   return error.message.includes("No message found with message.uuid")
 }
+
+/**
+ * Quick check whether an error message indicates a rate limit.
+ * Used by server.ts to decide whether to retry with a smaller context window.
+ */
+export function isRateLimitError(errMsg: string): boolean {
+  const lower = errMsg.toLowerCase()
+  return lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")
+}

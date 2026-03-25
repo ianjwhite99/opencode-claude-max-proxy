@@ -17,18 +17,53 @@ export interface ClaudeAuthStatus {
   email?: string
 }
 
+
 const AUTH_STATUS_CACHE_TTL_MS = 60_000
 
 let cachedAuthStatus: ClaudeAuthStatus | null = null
 let cachedAuthStatusAt = 0
 let cachedAuthStatusPromise: Promise<ClaudeAuthStatus | null> | null = null
 
+/**
+ * Only Claude 4.6 models support the 1M extended context window.
+ * Older models (4.5 and earlier) do not.
+ */
+function supports1mContext(model: string): boolean {
+  // Explicit older versions (4-5, 4.5, etc.) do not support 1M
+  if (model.includes("4-5") || model.includes("4.5")) return false
+  // Everything else (bare names, 4-6, unknown) defaults to latest (1M capable)
+  return true
+}
+
 export function mapModelToClaudeModel(model: string, subscriptionType?: string | null): ClaudeModel {
-  if (model.includes("opus")) return "opus[1m]"
   if (model.includes("haiku")) return "haiku"
+
+  const use1m = supports1mContext(model)
+
+  if (model.includes("opus")) return use1m ? "opus[1m]" : "opus"
+
   const sonnetOverride = process.env.CLAUDE_PROXY_SONNET_MODEL
   if (sonnetOverride === "sonnet" || sonnetOverride === "sonnet[1m]") return sonnetOverride
+
+  if (!use1m) return "sonnet"
   return subscriptionType === "max" ? "sonnet[1m]" : "sonnet"
+}
+
+/**
+ * Strip the [1m] suffix from a model, returning the base variant.
+ * Used for fallback when the 1M context window is rate-limited.
+ */
+export function stripExtendedContext(model: ClaudeModel): ClaudeModel {
+  if (model === "opus[1m]") return "opus"
+  if (model === "sonnet[1m]") return "sonnet"
+  return model
+}
+
+/**
+ * Check whether a model is using extended (1M) context.
+ */
+export function hasExtendedContext(model: ClaudeModel): boolean {
+  return model.endsWith("[1m]")
 }
 
 export async function getClaudeAuthStatusAsync(): Promise<ClaudeAuthStatus | null> {

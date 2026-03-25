@@ -2,7 +2,7 @@
  * Unit tests for model mapping and utility functions.
  */
 import { afterEach, beforeEach, describe, it, expect, mock } from "bun:test"
-import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus, getClaudeAuthStatusAsync } from "../proxy/models"
+import { mapModelToClaudeModel, isClosedControllerError, resetCachedClaudeAuthStatus, getClaudeAuthStatusAsync, stripExtendedContext, hasExtendedContext } from "../proxy/models"
 
 describe("mapModelToClaudeModel", () => {
   const originalSonnetModel = process.env.CLAUDE_PROXY_SONNET_MODEL
@@ -12,10 +12,14 @@ describe("mapModelToClaudeModel", () => {
     else process.env.CLAUDE_PROXY_SONNET_MODEL = originalSonnetModel
     resetCachedClaudeAuthStatus()
   })
-  it("maps opus models to opus[1m]", () => {
-    expect(mapModelToClaudeModel("claude-opus-4-5")).toBe("opus[1m]")
-    expect(mapModelToClaudeModel("opus")).toBe("opus[1m]")
+
+  it("maps opus 4.6 models to opus[1m]", () => {
     expect(mapModelToClaudeModel("claude-opus-4-6")).toBe("opus[1m]")
+    expect(mapModelToClaudeModel("opus")).toBe("opus[1m]")
+  })
+
+  it("maps opus 4.5 models to opus (no 1M)", () => {
+    expect(mapModelToClaudeModel("claude-opus-4-5")).toBe("opus")
   })
 
   it("maps haiku models to haiku", () => {
@@ -23,10 +27,15 @@ describe("mapModelToClaudeModel", () => {
     expect(mapModelToClaudeModel("haiku")).toBe("haiku")
   })
 
-  it("maps sonnet models to sonnet[1m] for max subscriptions", () => {
-    expect(mapModelToClaudeModel("claude-sonnet-4-5", "max")).toBe("sonnet[1m]")
+  it("maps sonnet 4.6 models to sonnet[1m] for max subscriptions", () => {
+    expect(mapModelToClaudeModel("claude-sonnet-4-6", "max")).toBe("sonnet[1m]")
     expect(mapModelToClaudeModel("sonnet", "max")).toBe("sonnet[1m]")
-    expect(mapModelToClaudeModel("claude-sonnet-4-5-20250929", "max")).toBe("sonnet[1m]")
+  })
+
+  it("maps sonnet 4.5 models to sonnet (no 1M regardless of subscription)", () => {
+    expect(mapModelToClaudeModel("claude-sonnet-4-5")).toBe("sonnet")
+    expect(mapModelToClaudeModel("claude-sonnet-4-5-20250929")).toBe("sonnet")
+    expect(mapModelToClaudeModel("claude-sonnet-4-5", "max")).toBe("sonnet")
   })
 
   it("maps sonnet models to plain sonnet for non-max subscriptions", () => {
@@ -99,6 +108,38 @@ describe("getClaudeAuthStatusAsync", () => {
     // depending on whether claude is installed — either way it re-executed
     // We just verify reset didn't break anything
     expect(result2 === null || typeof result2 === "object").toBe(true)
+  })
+})
+
+describe("stripExtendedContext", () => {
+  it("strips [1m] from opus", () => {
+    expect(stripExtendedContext("opus[1m]")).toBe("opus")
+  })
+
+  it("strips [1m] from sonnet", () => {
+    expect(stripExtendedContext("sonnet[1m]")).toBe("sonnet")
+  })
+
+  it("returns haiku unchanged", () => {
+    expect(stripExtendedContext("haiku")).toBe("haiku")
+  })
+
+  it("returns base models unchanged", () => {
+    expect(stripExtendedContext("opus")).toBe("opus")
+    expect(stripExtendedContext("sonnet")).toBe("sonnet")
+  })
+})
+
+describe("hasExtendedContext", () => {
+  it("returns true for [1m] models", () => {
+    expect(hasExtendedContext("opus[1m]")).toBe(true)
+    expect(hasExtendedContext("sonnet[1m]")).toBe(true)
+  })
+
+  it("returns false for base models", () => {
+    expect(hasExtendedContext("opus")).toBe(false)
+    expect(hasExtendedContext("sonnet")).toBe(false)
+    expect(hasExtendedContext("haiku")).toBe(false)
   })
 })
 
