@@ -185,7 +185,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         let model = mapModelToClaudeModel(body.model || "sonnet", authStatus?.subscriptionType)
         const stream = body.stream ?? true
         const adapter = openCodeAdapter
-        const workingDirectory = adapter.extractWorkingDirectory(body) || process.env.CLAUDE_PROXY_WORKDIR || process.cwd()
+        const workingDirectory = process.env.CLAUDE_PROXY_WORKDIR || adapter.extractWorkingDirectory(body) || process.cwd()
 
         // Strip env vars that would cause the SDK subprocess to loop back through
         // the proxy instead of using its native Claude Max auth. Also strip vars
