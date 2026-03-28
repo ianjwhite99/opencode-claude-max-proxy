@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.19.0](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.18.2...v1.19.0) (2026-03-27)
+
+
+### Features
+
+* show client model version in telemetry ([f77095f](https://github.com/rynfar/opencode-claude-max-proxy/commit/f77095ff8ca8901bd2370b2735772102854a565a))
+* show client model version in telemetry ([f3b8aa0](https://github.com/rynfar/opencode-claude-max-proxy/commit/f3b8aa0bf5a53b44a137d0be2c5177a1dc8ab2ed)), closes [#169](https://github.com/rynfar/opencode-claude-max-proxy/issues/169)
+
+
+### Bug Fixes
+
+* treat identical message replay as diverged, not continuation ([c819b4e](https://github.com/rynfar/opencode-claude-max-proxy/commit/c819b4ec5bf2452f1eddb76ee99fd123caa52a1a))
+* treat identical message replay as diverged, not continuation ([465eb19](https://github.com/rynfar/opencode-claude-max-proxy/commit/465eb194c41e0790947e735dfc5a291b34f7e494)), closes [#171](https://github.com/rynfar/opencode-claude-max-proxy/issues/171)
+
 ## [1.18.2](https://github.com/rynfar/opencode-claude-max-proxy/compare/v1.18.1...v1.18.2) (2026-03-26)
 
 
