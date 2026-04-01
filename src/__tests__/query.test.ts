@@ -30,6 +30,7 @@ describe("buildQueryOptions", () => {
     expect(result.options.cwd).toBe("/tmp/test")
     expect(result.options.maxTurns).toBe(200)
     expect(result.options.permissionMode).toBe("bypassPermissions")
+    expect((result.options as any).allowDangerouslySkipPermissions).toBe(true)
     expect((result.options as any).includePartialMessages).toBeUndefined()
   })
 
@@ -139,6 +140,18 @@ describe("buildQueryOptions", () => {
     const result = buildQueryOptions(makeContext({ passthrough: false }))
     const env = (result.options as any).env
     expect(env.ENABLE_CLAUDEAI_MCP_SERVERS).toBeUndefined()
+  })
+
+  it("omits permission bypass flags when useBypassPermissions is false", () => {
+    const result = buildQueryOptions(makeContext({ useBypassPermissions: false }))
+    expect((result.options as any).permissionMode).toBeUndefined()
+    expect((result.options as any).allowDangerouslySkipPermissions).toBeUndefined()
+  })
+
+  it("includes permission bypass flags by default", () => {
+    const result = buildQueryOptions(makeContext())
+    expect(result.options.permissionMode).toBe("bypassPermissions")
+    expect((result.options as any).allowDangerouslySkipPermissions).toBe(true)
   })
 
   it("includes hooks when provided", () => {

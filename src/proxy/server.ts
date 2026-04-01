@@ -17,7 +17,7 @@ import { createPassthroughMcpServer, stripMcpPrefix, PASSTHROUGH_MCP_NAME, PASST
 
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml } from "../telemetry"
 import type { RequestMetric } from "../telemetry"
-import { classifyError, isStaleSessionError, isRateLimitError } from "./errors"
+import { classifyError, isStaleSessionError, isRateLimitError, isPermissionBypassError } from "./errors"
 import { mapModelToClaudeModel, resolveClaudeExecutableAsync, isClosedControllerError, getClaudeAuthStatusAsync, hasExtendedContext, stripExtendedContext } from "./models"
 import { getLastUserMessage } from "./messages"
 import { detectAdapter } from "./adapters/detect"
@@ -50,6 +50,18 @@ export type { LineageResult }
 const exec = promisify(execCallback)
 
 let claudeExecutable = ""
+
+/**
+ * Tracks whether bypassPermissions is supported by the current Claude CLI.
+ * Starts true; set to false on first exit-code-1 failure, then all
+ * subsequent requests skip the flags without needing to retry.
+ */
+let bypassPermissionsSupported = true
+
+/** Reset bypass permission state — exposed for tests only */
+export function resetBypassPermissionsState() {
+  bypassPermissionsSupported = true
+}
 
 /**
  * Build a prompt from all messages for a fresh (non-resume) session.
@@ -484,6 +496,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                     passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+                    useBypassPermissions: bypassPermissionsSupported,
                   }))) {
                     if ((event as any).type === "assistant") {
                       didYieldContent = true
@@ -496,6 +509,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                   // Never retry after response content was yielded — response is committed
                   if (didYieldContent) throw error
+
+                  // Retry: permission bypass flags unsupported — disable and retry (one-shot)
+                  if (bypassPermissionsSupported && isPermissionBypassError(error)) {
+                    bypassPermissionsSupported = false
+                    claudeLog("upstream.bypass_permissions_unsupported", { mode: "non_stream" })
+                    console.error(`[PROXY] ${requestMeta.requestId} bypassPermissions caused exit code 1, retrying without permission flags`)
+                    continue
+                  }
 
                   // Retry: stale undo UUID — evict session and start fresh (one-shot)
                   if (isStaleSessionError(error)) {
@@ -513,6 +534,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: false, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter,
+                      useBypassPermissions: bypassPermissionsSupported,
                     }))
                     return
                   }
@@ -772,6 +794,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       prompt: makePrompt(), model, workingDirectory, systemContext, claudeExecutable,
                       passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                       resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+                      useBypassPermissions: bypassPermissionsSupported,
                     }))) {
                       if ((event as any).type === "stream_event") {
                         didYieldClientEvent = true
@@ -784,6 +807,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
                     // Never retry after client-visible SSE events — response is committed
                     if (didYieldClientEvent) throw error
+
+                    // Retry: permission bypass flags unsupported — disable and retry (one-shot)
+                    if (bypassPermissionsSupported && isPermissionBypassError(error)) {
+                      bypassPermissionsSupported = false
+                      claudeLog("upstream.bypass_permissions_unsupported", { mode: "stream" })
+                      console.error(`[PROXY] ${requestMeta.requestId} bypassPermissions caused exit code 1, retrying without permission flags`)
+                      continue
+                    }
 
                     // Retry: stale undo UUID — evict and start fresh (one-shot)
                     if (isStaleSessionError(error)) {
@@ -801,6 +832,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         model, workingDirectory, systemContext, claudeExecutable,
                         passthrough, stream: true, sdkAgents, passthroughMcp, cleanEnv,
                         resumeSessionId: undefined, isUndo: false, undoRollbackUuid: undefined, sdkHooks, adapter,
+                        useBypassPermissions: bypassPermissionsSupported,
                       }))
                       return
                     }

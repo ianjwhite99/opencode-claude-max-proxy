@@ -47,15 +47,6 @@ export function classifyError(errMsg: string): ClassifiedError {
     const codeMatch = errMsg.match(/exited with code (\d+)/)
     const code = codeMatch ? codeMatch[1] : "unknown"
 
-    // Code 1 with no other info is usually auth
-    if (code === "1" && !lower.includes("tool") && !lower.includes("mcp")) {
-      return {
-        status: 401,
-        type: "authentication_error",
-        message: "Claude Code process crashed (exit code 1). This usually means authentication expired. Run 'claude login' in your terminal to re-authenticate, then restart the proxy."
-      }
-    }
-
     return {
       status: 502,
       type: "api_error",
@@ -96,6 +87,19 @@ export function classifyError(errMsg: string): ClassifiedError {
     type: "api_error",
     message: errMsg || "Unknown error"
   }
+}
+
+/**
+ * Detect exit code 1 errors that may be caused by unsupported permission
+ * bypass flags (permissionMode / allowDangerouslySkipPermissions).
+ * These flags cause some Claude CLI versions to exit immediately.
+ */
+export function isPermissionBypassError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const msg = error.message.toLowerCase()
+  // Match "code 1" only when followed by end-of-string, punctuation, or whitespace (not another digit)
+  return /(?:exited with code|exit code) 1(?!\d)/.test(msg)
+    && !msg.includes("tool") && !msg.includes("mcp") && !msg.includes("rate limit")
 }
 
 /**

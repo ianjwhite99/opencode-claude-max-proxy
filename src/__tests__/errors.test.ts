@@ -2,7 +2,7 @@
  * Unit tests for classifyError — pure function, no mocks needed.
  */
 import { describe, it, expect } from "bun:test"
-import { classifyError, isStaleSessionError } from "../proxy/errors"
+import { classifyError, isStaleSessionError, isPermissionBypassError } from "../proxy/errors"
 
 describe("classifyError", () => {
   describe("authentication errors", () => {
@@ -27,20 +27,8 @@ describe("classifyError", () => {
       expect(result.status).toBe(401)
     })
 
-    it("detects process exit code 1 as auth error", () => {
+    it("does NOT classify exit code 1 as auth (may be permission bypass)", () => {
       const result = classifyError("Claude Code process exited with code 1")
-      expect(result.status).toBe(401)
-      expect(result.type).toBe("authentication_error")
-    })
-
-    it("does NOT classify exit code 1 as auth when 'tool' is mentioned", () => {
-      const result = classifyError("Claude Code process exited with code 1 - tool error")
-      expect(result.status).toBe(502)
-      expect(result.type).toBe("api_error")
-    })
-
-    it("does NOT classify exit code 1 as auth when 'mcp' is mentioned", () => {
-      const result = classifyError("Claude Code process exited with code 1 - mcp server crashed")
       expect(result.status).toBe(502)
       expect(result.type).toBe("api_error")
     })
@@ -153,6 +141,33 @@ describe("classifyError", () => {
       expect(isStaleSessionError("No message found with message.uuid")).toBe(false)
       expect(isStaleSessionError(null)).toBe(false)
       expect(isStaleSessionError(undefined)).toBe(false)
+    })
+  })
+
+  describe("permission bypass detection", () => {
+    it("detects exit code 1 as potential permission bypass error", () => {
+      expect(isPermissionBypassError(new Error("Claude Code process exited with code 1"))).toBe(true)
+    })
+
+    it("detects 'exit code 1' variant", () => {
+      expect(isPermissionBypassError(new Error("process failed with exit code 1"))).toBe(true)
+    })
+
+    it("returns false when 'tool' is mentioned", () => {
+      expect(isPermissionBypassError(new Error("exited with code 1 - tool error"))).toBe(false)
+    })
+
+    it("returns false when 'mcp' is mentioned", () => {
+      expect(isPermissionBypassError(new Error("exited with code 1 - mcp crash"))).toBe(false)
+    })
+
+    it("returns false for other exit codes", () => {
+      expect(isPermissionBypassError(new Error("exited with code 137"))).toBe(false)
+    })
+
+    it("returns false for non-Error values", () => {
+      expect(isPermissionBypassError("exited with code 1")).toBe(false)
+      expect(isPermissionBypassError(null)).toBe(false)
     })
   })
 

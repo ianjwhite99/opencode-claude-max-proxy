@@ -55,7 +55,7 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
-const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { createProxyServer, clearSessionCache, resetBypassPermissionsState } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -91,6 +91,7 @@ describe("Phase 2: SDK should not use internal tools", () => {
   beforeEach(() => {
     mockMessages = []
     capturedQueryParams = null
+    resetBypassPermissionsState()
   })
 
   it("should use maxTurns: 200 for multi-turn tool execution", async () => {

@@ -45,7 +45,7 @@ mock.module("../mcpTools", () => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
-const { createProxyServer, clearSessionCache } = await import("../proxy/server")
+const { createProxyServer, clearSessionCache, resetBypassPermissionsState } = await import("../proxy/server")
 
 function createTestApp() {
   const { app } = createProxyServer({ port: 0, host: "127.0.0.1" })
@@ -71,6 +71,7 @@ describe("Error classification", () => {
   beforeEach(() => {
     mockError = null
     clearSessionCache()
+    resetBypassPermissionsState()
   })
 
   it("should return 401 for authentication errors", async () => {
@@ -84,15 +85,15 @@ describe("Error classification", () => {
     expect(body.error.message).toContain("claude login")
   })
 
-  it("should return 401 for process exit code 1", async () => {
+  it("should return 502 for process exit code 1 (retries without bypass first)", async () => {
     mockError = new Error("Claude Code process exited with code 1")
     const app = createTestApp()
     const res = await post(app, BASIC_REQUEST)
     const body = await res.json()
 
-    expect(res.status).toBe(401)
-    expect(body.error.type).toBe("authentication_error")
-    expect(body.error.message).toContain("claude login")
+    expect(res.status).toBe(502)
+    expect(body.error.type).toBe("api_error")
+    expect(body.error.message).toContain("exited unexpectedly")
   })
 
   it("should return 429 for rate limit errors", async () => {

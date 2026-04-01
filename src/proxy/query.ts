@@ -40,6 +40,8 @@ export interface QueryContext {
   sdkHooks?: any
   /** The agent adapter providing tool configuration */
   adapter: AgentAdapter
+  /** Whether to use permission bypass flags (default: true) */
+  useBypassPermissions?: boolean
 }
 
 /**
@@ -52,6 +54,7 @@ export function buildQueryOptions(ctx: QueryContext) {
     prompt, model, workingDirectory, systemContext, claudeExecutable,
     passthrough, stream, sdkAgents, passthroughMcp, cleanEnv,
     resumeSessionId, isUndo, undoRollbackUuid, sdkHooks, adapter,
+    useBypassPermissions = true,
   } = ctx
 
   const blockedTools = [...adapter.getBlockedBuiltinTools(), ...adapter.getAgentIncompatibleTools()]
@@ -66,8 +69,10 @@ export function buildQueryOptions(ctx: QueryContext) {
       model,
       pathToClaudeCodeExecutable: claudeExecutable,
       ...(stream ? { includePartialMessages: true } : {}),
-      permissionMode: "bypassPermissions" as const,
-      allowDangerouslySkipPermissions: true,
+      ...(useBypassPermissions ? {
+        permissionMode: "bypassPermissions" as const,
+        allowDangerouslySkipPermissions: true,
+      } : {}),
       ...(systemContext ? {
         systemPrompt: passthrough
           ? systemContext
